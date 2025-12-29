@@ -1,0 +1,104 @@
+# Technical Process Log: GraphQL CSRF & WAF Evasion Research
+
+**Target:** [Redacted Food Delivery Platform]
+**Testing Period:** November - December 2025
+**Tools Used:** Burp Suite Community (Repeater, Intruder), Firefox Multi-Account Containers
+
+## 1. Initial Reconnaissance & Hypothesis
+During endpoint enumeration, I identified a GraphQL API endpoint (`/graphql`) used for user profile management. Standard `POST` requests to this endpoint required a specific `X-Csrftoken` header and a matching `csrf_token` cookie.
+
+**Hypothesis:** 
+The application's WAF or middleware might exempt "safe" HTTP methods (like `GET`) from CSRF checks. If the GraphQL resolver accepts mutation parameters via query strings or method overrides, it might be possible to bypass the token validation.
+
+---
+
+## 2. WAF & Filter Analysis
+
+### Test 2.1: Baseline Block
+I attempted a standard Cross-Site Request Forgery (CSRF) attack using a hidden HTML form.
+* **Method:** `POST`
+* **Payload:** Standard GraphQL mutation in body.
+* **Result:** `403 Forbidden`
+* **Analysis:** The server correctly validates the Origin and CSRF token for standard POST requests.
+
+### Test 2.2: HTTP Method Override (The Bypass)
+I injected standard framework override parameters to test if the server would downgrade the security context.
+
+**Request:**
+
+http
+    POST /graphql/editProfile?_method=GET HTTP/2
+    Host: target-app.com
+    Cookie: [Session Cookies Only - No CSRF Token]
+
+
+
+
+**Result:** 400 Bad Request Response Body: "POST body missing, invalid Content-Type, or JSON object has no keys"
+
+
+**Analysis:**
+
+The status code shift from 403 Forbidden to 400 Bad Request is significant.
+
+It confirms that the CSRF check was skipped because the WAF treated the request as a GET due to the ?_method=GET parameter.
+
+The 400 error indicates the request reached the application layer (GraphQL parser) but failed validation there.
+
+
+
+---
+
+## 3. GraphQL Mutation Testing
+To validate the impact, I needed to turn the 400 into a 200 OK (State Change). I targeted simple mutations that require minimal arguments to reduce parsing errors.
+
+### Test 3.1:** Locale Preference Change
+* Target: mutation setUserLocalePreference($language: String!)
+
+* Attack Vector: Attempting to force the parsing of variables via URL-encoded parameters instead of JSON body.
+
+* Outcome: 400 Bad Request. The server strictly enforces Content-Type: application/json.
+
+* Constraint: Browsers cannot send application/json in a cross-site POST without a CORS preflight.
+
+
+
+### Test 3.2: Bookmarking a Store
+* Target: mutation bookmarkStore($storeId: ID!)
+
+* Technique: "JSON-in-a-Name" Body Injection.
+
+* Payload:
+    <input type="hidden" name='{"operationName":"bookmarkStore","variables":{"storeId":"12345"},"ignore":"' value='"}'>
+
+* Outcome: 400 Bad Request. The parser rejected the garbage characters appended by the HTML form encoding.
+
+---
+
+
+## 4. False Positive Analysis (Due Diligence)
+To ensure comprehensive coverage, I tested other potential bypass vectors to rule them out.
+
+### Test 4.1: CORS Misconfiguration
+* Test: Sent Origin: https://evil-attacker.com
+
+* Result: 200 OK, but Access-Control-Allow-Origin header was missing.
+
+* Conclusion: Not vulnerable. The server allows the request but does not return the data to the attacker's origin.
+
+
+### Test 4.2: Host Header Injection
+* Test: Injected X-Forwarded-Host: attacker.com on the /consumer/invite endpoint.
+
+* Result: The generated invite links in the response body did not reflect the injected host.
+
+* Conclusion: Not vulnerable. The application uses a hardcoded base URL for invites.
+
+
+--- 
+
+
+## 5. Conclusion
+A logic flaw exists in the WAF/Middleware where _method=GET successfully bypasses the Anti-CSRF token check. However, the vulnerability is currently mitigated by a secondary "Defense in Depth" control: the strict enforcement of Content-Type: application/json at the application layer.
+
+While full exploitation (account takeover) was prevented, this research highlights a critical misconfiguration in the security gateway that could become exploitable if the backend parser rules are relaxed in the future.
